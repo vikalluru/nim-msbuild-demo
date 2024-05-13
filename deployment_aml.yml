@@ -1,0 +1,16 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
+name: nim-aml-mixtral-deployment-1
+endpoint_name: nim-aml-endpoint-1
+model: azureml://registries/azureml/models/mistralai-Mixtral-8x7B-Instruct-v01/versions/5
+environment: azureml://registries/NVIDIARegistryTest1/environments/nvidia-nim-env/versions/1
+instance_type: Standard_NC96ads_A100_v4
+instance_count: 1
+request_settings:
+  max_concurrent_requests_per_instance: 15
+  request_timeout_ms: 10000
+environment_variables:
+    MODEL_NAME: "mixtral-instruct"
+    NUM_GPUS: "4" # Number of GPUs to deploy the service on
+    MAX_BATCH_SIZE: "16"
+    MAX_INPUT_LEN: "4096"
+    MAX_OUTPUT_LEN: "4096"

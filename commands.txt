@@ -1,0 +1,11 @@
+# Login
+az login
+
+# Set credentials
+az account set -s $subscription_id
+ 
+# Create endpoint
+az ml online-endpoint create -f endpoint_aml.yml --resource-group $resource_group --workspace-name nim-mixtral-demo
+
+# Create deployment
+az ml online-deployment create -f deployment_aml.yml --resource-group $resource_group --workspace-name nim-mixtral-demo
