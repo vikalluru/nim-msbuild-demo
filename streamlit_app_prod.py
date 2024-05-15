@@ -3,19 +3,23 @@ import time
 import json
 import requests
 
+from transformers import AutoTokenizer
+
 # Define the API endpoints and keys
 
-# VLLM
-api_url_1 = 'https://nim-aml-endpoint-1.westeurope.inference.ml.azure.com'
-model_1 = "/var/azureml-app/azureml-models/mistralai-Mixtral-8x7B-Instruct-v01/5/mlflow_model_folder/data/model"
-deployment_1 = "vllm-aml-mixtral-deployment"
+nim_off_config = {
+    "url": "https://nim-aml-endpoint-1.westeurope.inference.ml.azure.com",
+    "key": "mVHiH89aX9KtWvartgwXG5V1fmCAjYEy",
+    "model": "/var/azureml-app/azureml-models/mistralai-Mixtral-8x7B-Instruct-v01/5/mlflow_model_folder/data/model",
+    "deployment_name": "os-aml-mixtral-deployment-1"
+}
 
-# NIM
-api_url_2 = 'https://nim-aml-endpoint-1.westeurope.inference.ml.azure.com'
-model_2 = "mixtral-instruct"
-deployment_2 = "nim-aml-mixtral-deployment-1"
-
-API_TOKEN = "mVHiH89aX9KtWvartgwXG5V1fmCAjYEy"
+nim_on_config = {
+    "url": "https://nim-aml-endpoint-1.westeurope.inference.ml.azure.com",
+    "key": "mVHiH89aX9KtWvartgwXG5V1fmCAjYEy",
+    "model": "mixtral-instruct",
+    "deployment_name": "nim-aml-mixtral-deployment-1"
+}
 
 vllm_ttft = 0
 vllm_time_to_next_token = []
@@ -25,59 +29,47 @@ nim_ttft = 0
 nim_time_to_next_token = []
 nim_tokens_received = 0
 
+tokenizer = AutoTokenizer.from_pretrained("mistralai/Mixtral-8x7B-Instruct-v0.1", token="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")
+
 # Set the title of the Streamlit app
 st.set_page_config(layout="wide")
 st.header('NIM OFF vs NIM ON')
 
-col_header, col_dropdown, col_toggle = st.columns([2, 2, 2])
+def is_promptflow(url):
+    return  "/score" in url
 
-# Subheader
-col_header.subheader('Mixtral 8x7B - Azure NC A100 v4')
-
-# Injecting custom CSS via Markdown to style around the toggle
-col_toggle.markdown(
-    """
-    <style>
-    .stToggle > label {
-        font-size: 16px; /* Adjusting label size which can give a perception of a larger toggle */
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-# Dropdown for model selection
-model_options = ["Llama 3 7B", "Mistral 7B", "Mixtral 8x7B"]
-selected_model = col_dropdown.selectbox("Choose model:", model_options)
-
-# Toggle button
-def handle_toggle_change():
-    if 'toggle_previous' in st.session_state:
-        if st.session_state.toggle_previous != st.session_state.self_hosting:
-            st.session_state.toggle_previous = st.session_state.self_hosting
-            st.toast(f"Self Hosting is now {'enabled' if st.session_state.self_hosting else 'disabled'}")
-    else:
-        st.session_state.toggle_previous = st.session_state.self_hosting
-
-self_hosting = col_toggle.toggle(
-    "Enable Self Hosting", 
-    value=False, 
-    key='self_hosting', 
-    on_change=handle_toggle_change, 
-    label_visibility="visible"
-)
-
-col1, col2 = st.columns(2)
-
-def check_vllm_health():
+def generate_headers(url, key, deployment_name):
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {API_TOKEN}',
-        'azureml-model-deployment': deployment_1,
+        'Authorization': f'Bearer {key}'
     }
-    url = api_url_1 + "/health"
+
+    if deployment_name:
+        headers.update({'azureml-model-deployment': deployment_name})
+    
+    if is_promptflow(url):
+        headers.update({"Accept": "text/event-stream"})
+    
+    return headers
+
+def generate_body(url, model, messages):
+    if is_promptflow(url):
+        assert messages[-1]["role"] == "user"
+        return {
+            "question" : messages[-1]["content"]
+        }
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": 1024,
+        "stream": True
+    }
+    return body
+
+def check_vllm_health(url, key, deployment_name):
+    headers = generate_headers(url, key, deployment_name)
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url + "/health", headers=headers)
         if response.status_code == 200:
             return True
         else:
@@ -85,15 +77,10 @@ def check_vllm_health():
     except requests.exceptions.RequestException as e:
         return False
     
-def check_nim_health():
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {API_TOKEN}',
-        'azureml-model-deployment': deployment_2,
-    }
-    url = api_url_2 + "/v1/models"
+def check_nim_health(url, key, deployment_name):
+    headers = generate_headers(url, key, deployment_name)
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url + "/v1/models", headers=headers)
         if response.status_code == 200:
             return True
         else:
@@ -102,21 +89,9 @@ def check_nim_health():
         return False    
     
 
-def get_vllm_stream_response(messages):
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {API_TOKEN}',
-        'azureml-model-deployment': deployment_1,
-    }
-
-    body = {
-        "model": model_1,
-        "messages": messages,
-        "max_tokens": 1024,
-        "stream": True
-    }
-
-    url = api_url_1 + "/v1/chat/completions"
+def get_vllm_stream_response(url, key, model, deployment_name, messages):
+    headers = generate_headers(url, key, deployment_name)
+    body = generate_body(url, model, messages)
 
     error_msg = ""
     error_response_code = -1
@@ -130,7 +105,7 @@ def get_vllm_stream_response(messages):
 
     try:
         with requests.post(
-            url,
+            url + "/v1/chat/completions",
             json=body,
             stream=True,
             timeout=180,
@@ -174,24 +149,12 @@ def get_vllm_stream_response(messages):
         print(f"Warning Or Error: {error_msg} {error_response_code}")
 
 
-def get_nim_stream_response(messages):
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {API_TOKEN}',
-        'azureml-model-deployment': deployment_2,
-    }
-
-    body = {
-        "model": model_2,
-        "messages": messages,
-        "max_tokens": 1024,
-        "stream": True
-    }
+def get_nim_stream_response(url, key, model, deployment_name, messages):
+    headers = generate_headers(url, key, deployment_name)
+    body = generate_body(url, model, messages)
 
     error_msg = ""
     error_response_code = -1
-
-    url = api_url_2 + "/v1/chat/completions"
 
     global nim_ttft
     global nim_tokens_received
@@ -202,7 +165,7 @@ def get_nim_stream_response(messages):
 
     try:
         with requests.post(
-            url,
+            url + "/v1/chat/completions",
             json=body,
             stream=True,
             timeout=180,
@@ -250,14 +213,43 @@ def get_nim_stream_response(messages):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+col1, col2, col3, col4, col5 = st.columns([2,2,2,2,1])
+
+st.markdown("""
+    <style>
+    .custom-button {
+        padding-top: 10px;
+        padding-bottom: 20px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 with col1:
-    if check_vllm_health():
+    url = st.text_input("Endpoint", value=nim_on_config["url"])
+    nim_on_config["url"] = url
+with col2:
+    key = st.text_input("API key", value=nim_on_config["key"])
+    nim_on_config["key"] = key    
+with col3:
+    model = st.text_input("Model", value=nim_on_config["model"])
+    nim_on_config["model"] = model
+with col4:
+    deployment_name = st.text_input("Deployment", value=nim_on_config["deployment_name"])
+    nim_on_config["deployment_name"] = deployment_name
+col5.markdown('<div class="custom-button"></div>', unsafe_allow_html=True)
+if col5.button('Go'):
+    st.session_state.messages = []
+
+col1, col2 = st.columns(2)        
+
+with col1:
+    if check_vllm_health(nim_off_config["url"], nim_off_config["key"], nim_off_config["deployment_name"]):
         st.markdown('<p style="color:green; font-size:16px; text-align:right;">NIM-OFF Status: 🟢 Up</p>', unsafe_allow_html=True)
     else:
         st.markdown('<p style="color:red; font-size:16px; text-align:right;">NIM-OFF Status: 🔴 Down</p>', unsafe_allow_html=True)
 
 with col2:
-    if check_nim_health():
+    if check_nim_health(nim_on_config["url"], nim_on_config["key"], nim_on_config["deployment_name"]):
         st.markdown('<p style="color:green; font-size:16px; text-align:right;">NIM-ON Status: 🟢 Up</p>', unsafe_allow_html=True)
     else:
         st.markdown('<p style="color:red; font-size:16px; text-align:right;">NIM-ON Status: 🔴 Down</p>', unsafe_allow_html=True)
@@ -289,33 +281,40 @@ if prompt := st.chat_input("What is up?"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
             stream = get_vllm_stream_response(
+                nim_off_config["url"], nim_off_config["key"], nim_off_config["model"], nim_off_config["deployment_name"],
                 messages = [
                     {"role": "assistant" if m["role"] == "VLLM" else m["role"], "content": m["content"]}
                     for m in st.session_state.messages if m["role"] in ["user", "VLLM"]
                 ]
             )
             response = st.write_stream(stream)
-            itl = sum(vllm_time_to_next_token)
-            metrics = "Received: " +  "{:.0f}".format(vllm_tokens_received) +  " tokens"  + "\tITL: " + "{:.2f}".format(itl) + " seconds"
-            vllm_throughput = vllm_tokens_received/itl
-            st.markdown(f'''`{metrics}`''')
+            if len(response) > 0:
+                itl = sum(vllm_time_to_next_token)
+                vllm_tokens_received = len(tokenizer([response])['input_ids'][0])
+                metrics = "Received: " +  "{:.0f}".format(vllm_tokens_received) +  " tokens"  + "\tITL: " + "{:.2f}".format(itl) + " seconds"
+                vllm_throughput = vllm_tokens_received/itl
+                st.markdown(f'''`{metrics}`''')
     st.session_state.messages.append({"role": "VLLM", "content": response})
+
     with col2:
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
             stream = get_nim_stream_response(
+                nim_on_config["url"], nim_on_config["key"], nim_on_config["model"], nim_on_config["deployment_name"],
                 messages = [
                     {"role": "assistant" if m["role"] == "NIM" else m["role"], "content": m["content"]}
                     for m in st.session_state.messages if m["role"] in ["user", "NIM"]
                 ]
             )
             response = st.write_stream(stream)
-            itl = sum(nim_time_to_next_token)
-            nim_throughput = nim_tokens_received/itl
-            perf_gain = nim_throughput/vllm_throughput
-            metrics = "Received: " +  "{:.0f}".format(nim_tokens_received) +  " tokens"  + "\tITL: " + "{:.2f}".format(itl) + " seconds"
-            st.markdown(f'''`{metrics}`''')
-            gain = "Perf gain: "+"{:.1f}".format(perf_gain) + "X🚀"
-            st.markdown(f'''**{gain}**''')
+            if len(response) > 0:
+                itl = sum(nim_time_to_next_token)
+                nim_tokens_received = len(tokenizer([response])['input_ids'][0])
+                nim_throughput = nim_tokens_received/itl
+                perf_gain = nim_throughput/vllm_throughput
+                metrics = "Received: " +  "{:.0f}".format(nim_tokens_received) +  " tokens"  + "\tITL: " + "{:.2f}".format(itl) + " seconds"
+                st.markdown(f'''`{metrics}`''')
+                gain = "Perf gain: "+"{:.1f}".format(perf_gain) + "X🚀"
+                st.markdown(f'''**{gain}**''')
     st.session_state.messages.append({"role": "NIM", "content": response})
