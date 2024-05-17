@@ -35,7 +35,7 @@ nim_off_endpoints = {
     ),
     EndpointType.PROMPTFLOW: EndpointConfig(
         url="https://contoso-chat-deploy-nim-off-1.swedencentral.inference.ml.azure.com",
-        key="2oRAZmAMS9sf82VITJFuepp6moro9LDh",
+        key="NRl3ay0WFx8060aKfkhqVjFS4GFqQS9U",
         model="",
         deployment_name="contoso-chat-deploy-nim-off-1-1",
         health_url_extn="/health"
@@ -59,7 +59,7 @@ nim_on_endpoints = {
     ),
     EndpointType.PROMPTFLOW: EndpointConfig(
         url="https://contoso-chat-test-deploy-nim-on.swedencentral.inference.ml.azure.com",
-        key="RDuBWwFucakSbbxrhbAFEbBO26NQWRbb",
+        key="NRl3ay0WFx8060aKfkhqVjFS4GFqQS9U",
         model="",
         deployment_name="nim-on-deployment",
         health_url_extn="/health"
@@ -77,9 +77,9 @@ nim_off_ttft = 0
 nim_off_time_to_next_token = []
 nim_off_tokens_received = 0
 
-nim_ttft = 0
-nim_time_to_next_token = []
-nim_tokens_received = 0
+nim_on_ttft = 0
+nim_on_time_to_next_token = []
+nim_on_tokens_received = 0
 
 tokenizer = AutoTokenizer.from_pretrained("mistralai/Mixtral-8x7B-Instruct-v0.1", token="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")
 
@@ -92,9 +92,6 @@ def generate_headers(endpoint_type, endpoint_config):
     if endpoint_config.deployment_name != "":
         headers.update({'azureml-model-deployment': endpoint_config.deployment_name})
     
-    if endpoint_type == EndpointType.PROMPTFLOW:
-        headers.update({"Accept": "text/event-stream"})
-    
     return headers
 
 def generate_body(endpoint_type, endpoint_config, messages):
@@ -102,7 +99,7 @@ def generate_body(endpoint_type, endpoint_config, messages):
         assert messages[-1]["role"] == "user"
         return {
             "question" : messages[-1]["content"],
-            "max_tokens": 200
+            "max_tokens": 1024
         }
     body = {
         "model": endpoint_config.model,
@@ -115,8 +112,6 @@ def generate_body(endpoint_type, endpoint_config, messages):
 def check_health(endpoint_type, endpoint_config):
     headers = generate_headers(endpoint_type, endpoint_config)
     health_url = endpoint_config.url + endpoint_config.health_url_extn
-    print(health_url)
-    print(headers)
     try:
         response = requests.get(health_url, headers=headers)
         if response.status_code == 200:
@@ -125,6 +120,27 @@ def check_health(endpoint_type, endpoint_config):
             return False
     except requests.exceptions.RequestException as e:
         return False
+
+def get_promptflow_response(endpoint_type, endpoint_config, messages) -> str:
+    url, key, deployment_name, model = endpoint_config.url, endpoint_config.key, endpoint_config.deployment_name, endpoint_config.model
+    headers = generate_headers(endpoint_type, endpoint_config)
+    body = generate_body(endpoint_type, endpoint_config, messages)
+
+    try:
+        with requests.post(
+            url + "/score",
+            json=body,
+            headers=headers
+        ) as response:
+            if response.status_code != 200:
+                error_msg = response.text
+                error_response_code = response.status_code
+                response.raise_for_status()
+            return response.json()["content"]
+    
+    except Exception as e:
+        print(f"Warning or Error: {error_msg}, {error_response_code}")
+
 
 def get_promptflow_nim_off_stream_response(endpoint_type, endpoint_config, messages):
     url, key, deployment_name, model = endpoint_config.url, endpoint_config.key, endpoint_config.deployment_name, endpoint_config.model
@@ -161,8 +177,7 @@ def get_promptflow_nim_off_stream_response(endpoint_type, endpoint_config, messa
                 chunk = chunk[len(stem) :]
                 if chunk == b"[DONE]":
                     continue
-                data = json.loads(chunk)
-                
+                data = json.loads(chunk.decode('UTF-8'))
                 # Check errors
                 if "error" in data:
                     error_msg = data["error"]["message"]
@@ -199,10 +214,6 @@ def get_promptflow_nim_on_stream_response(endpoint_type, endpoint_config, messag
     start_time = time.monotonic()
     most_recent_received_token_time = time.monotonic()
 
-    print(url)
-    print(body)
-    print(headers)
-
     try:
         with requests.post(
             url + "/score",
@@ -223,14 +234,12 @@ def get_promptflow_nim_on_stream_response(endpoint_type, endpoint_config, messag
                 chunk = chunk[len(stem) :]
                 if chunk == b"[DONE]":
                     continue
-                data = json.loads(chunk)
-                
+                data = json.loads(chunk.decode('UTF-8'))    
                 # Check errors
                 if "error" in data:
                     error_msg = data["error"]["message"]
                     error_response_code = data["error"]["code"]
-                    raise RuntimeError(data["error"]["message"])                
-                
+                    raise RuntimeError(data["error"]["message"])
                 if data.get("content", None):
                     nim_on_tokens_received += 1
                     if not nim_on_ttft:
@@ -240,7 +249,7 @@ def get_promptflow_nim_on_stream_response(endpoint_type, endpoint_config, messag
                         nim_on_time_to_next_token.append(
                             time.monotonic() - most_recent_received_token_time
                         )
-                    most_recent_received_token_time = time.monotonic()                    
+                    most_recent_received_token_time = time.monotonic()
                     yield data["content"]
 
     except Exception as e:
@@ -314,9 +323,9 @@ def get_nim_stream_response(endpoint_type, endpoint_config, messages):
     error_msg = ""
     error_response_code = -1
 
-    global nim_ttft
-    global nim_tokens_received
-    global nim_time_to_next_token
+    global nim_on_ttft
+    global nim_on_tokens_received
+    global nim_on_time_to_next_token
 
     start_time = time.monotonic()
     most_recent_received_token_time = time.monotonic()
@@ -352,12 +361,12 @@ def get_nim_stream_response(endpoint_type, endpoint_config, messages):
                 
                 delta = data["choices"][0]["delta"]
                 if delta.get("content", None):
-                    nim_tokens_received += 1
-                    if not nim_ttft:
-                        nim_ttft = time.monotonic() - start_time
-                        nim_time_to_next_token.append(nim_ttft)
+                    nim_on_tokens_received += 1
+                    if not nim_on_ttft:
+                        nim_on_ttft = time.monotonic() - start_time
+                        nim_on_time_to_next_token.append(nim_on_ttft)
                     else:
-                        nim_time_to_next_token.append(
+                        nim_on_time_to_next_token.append(
                             time.monotonic() - most_recent_received_token_time
                         )
                     most_recent_received_token_time = time.monotonic()                    
@@ -491,11 +500,11 @@ if prompt := st.chat_input("What is up?"):
                 stream = get_nim_stream_response(endpoint_type, nim_on_config, messages)
             response = st.write_stream(stream)
             if len(response) > 0:
-                itl = sum(nim_time_to_next_token)
-                nim_tokens_received = len(tokenizer([response])['input_ids'][0])
-                nim_throughput = nim_tokens_received/itl
-                perf_gain = nim_throughput/nim_off_throughput
-                metrics = "Received: " +  "{:.0f}".format(nim_tokens_received) +  " tokens"  + "\tITL: " + "{:.2f}".format(itl) + " seconds"
+                itl = sum(nim_on_time_to_next_token)
+                nim_on_tokens_received = len(tokenizer([response])['input_ids'][0])
+                nim_on_throughput = nim_on_tokens_received/itl
+                perf_gain = nim_on_throughput/nim_off_throughput
+                metrics = "Received: " +  "{:.0f}".format(nim_on_tokens_received) +  " tokens"  + "\tITL: " + "{:.2f}".format(itl) + " seconds"
                 st.markdown(f'''`{metrics}`''')
                 gain = "Perf gain: "+"{:.1f}".format(perf_gain) + "X🚀"
                 st.markdown(f'''**{gain}**''')
