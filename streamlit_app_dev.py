@@ -2,6 +2,7 @@ import streamlit as st
 import time
 import json
 import requests
+import re
 
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -12,7 +13,7 @@ from streamlit_free_text_select import st_free_text_select
 # Define the API endpoints and keys
 
 class EndpointType(Enum):
-    AZUREML = auto()
+    AZURE_AI_STUDIO = auto()
     PROMPTFLOW = auto()
     API_CATALOG = auto()
 
@@ -25,8 +26,16 @@ class EndpointConfig:
     health_url_extn: str
 
 
+names_id = {
+    "Adel" : "13",
+    "Christian": "14",
+    "Abhishek": "15",
+    "Vineeth": "16",
+    "Manuel": "17"
+}
+
 nim_off_endpoints = {
-    EndpointType.AZUREML: EndpointConfig(
+    EndpointType.AZURE_AI_STUDIO: EndpointConfig(
         url="https://nim-aml-endpoint-1.westeurope.inference.ml.azure.com",
         key="mVHiH89aX9KtWvartgwXG5V1fmCAjYEy",
         model="/var/azureml-app/azureml-models/mistralai-Mixtral-8x7B-Instruct-v01/5/mlflow_model_folder/data/model",
@@ -34,10 +43,10 @@ nim_off_endpoints = {
         health_url_extn="/health"
     ),
     EndpointType.PROMPTFLOW: EndpointConfig(
-        url="https://contoso-chat-deploy-nim-off-1.swedencentral.inference.ml.azure.com",
+        url="https://contoso-flow-prompt-only.swedencentral.inference.ml.azure.com",
         key="NRl3ay0WFx8060aKfkhqVjFS4GFqQS9U",
-        model="",
-        deployment_name="contoso-chat-deploy-nim-off-1-1",
+        model="Mixtral 8x7B",
+        deployment_name="contoso-flow-prompt-only-1",
         health_url_extn="/health"
     ),
     EndpointType.API_CATALOG: EndpointConfig(
@@ -50,7 +59,7 @@ nim_off_endpoints = {
 }
 
 nim_on_endpoints = {
-    EndpointType.AZUREML: EndpointConfig(
+    EndpointType.AZURE_AI_STUDIO: EndpointConfig(
         url="https://nim-aml-endpoint-1.westeurope.inference.ml.azure.com",
         key="mVHiH89aX9KtWvartgwXG5V1fmCAjYEy",
         model="mixtral-instruct",
@@ -58,10 +67,10 @@ nim_on_endpoints = {
         health_url_extn="/v1/models"
     ),
     EndpointType.PROMPTFLOW: EndpointConfig(
-        url="https://contoso-chat-test-deploy-nim-on.swedencentral.inference.ml.azure.com",
+        url="https://contoso-flow-prompt-only.swedencentral.inference.ml.azure.com",
         key="NRl3ay0WFx8060aKfkhqVjFS4GFqQS9U",
-        model="",
-        deployment_name="nim-on-deployment",
+        model="Mixtral 8x7B",
+        deployment_name="contoso-flow-prompt-only-1",
         health_url_extn="/health"
     ),
     EndpointType.API_CATALOG: EndpointConfig(
@@ -83,6 +92,8 @@ nim_on_tokens_received = 0
 
 tokenizer = AutoTokenizer.from_pretrained("mistralai/Mixtral-8x7B-Instruct-v0.1", token="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")
 
+st.session_state.customer_id = "13"
+
 def generate_headers(endpoint_type, endpoint_config):
     headers = {
         'Content-Type': 'application/json',
@@ -95,12 +106,6 @@ def generate_headers(endpoint_type, endpoint_config):
     return headers
 
 def generate_body(endpoint_type, endpoint_config, messages):
-    if endpoint_type == EndpointType.PROMPTFLOW:
-        assert messages[-1]["role"] == "user"
-        return {
-            "question" : messages[-1]["content"],
-            "max_tokens": 1024
-        }
     body = {
         "model": endpoint_config.model,
         "messages": messages,
@@ -121,10 +126,27 @@ def check_health(endpoint_type, endpoint_config):
     except requests.exceptions.RequestException as e:
         return False
 
-def get_promptflow_response(endpoint_type, endpoint_config, messages) -> str:
+def get_promptflow_response_and_modify_user_message(endpoint_type, endpoint_config, prompt, messages):
     url, key, deployment_name, model = endpoint_config.url, endpoint_config.key, endpoint_config.deployment_name, endpoint_config.model
     headers = generate_headers(endpoint_type, endpoint_config)
-    body = generate_body(endpoint_type, endpoint_config, messages)
+
+    content = ""
+    
+    assert messages[-1]["role"] == "user"
+
+    body = {
+        "question" : prompt
+    }
+
+    names = [key for key in names_id]
+    username_pattern = r'\b(?:' + '|'.join(names) + r')\b'
+    matches = re.findall(username_pattern, prompt)
+
+    if matches:
+        user_name = matches[0]
+        st.session_state.customer_id = names_id[user_name]
+    
+    body.update({'customerId': st.session_state.customer_id})
 
     try:
         with requests.post(
@@ -136,124 +158,14 @@ def get_promptflow_response(endpoint_type, endpoint_config, messages) -> str:
                 error_msg = response.text
                 error_response_code = response.status_code
                 response.raise_for_status()
-            return response.json()["content"]
+            data = response.json()
+            if data.get("content", None):
+                content = response.json()["content"]
     
     except Exception as e:
         print(f"Warning or Error: {error_msg}, {error_response_code}")
-
-
-def get_promptflow_nim_off_stream_response(endpoint_type, endpoint_config, messages):
-    url, key, deployment_name, model = endpoint_config.url, endpoint_config.key, endpoint_config.deployment_name, endpoint_config.model
-    headers = generate_headers(endpoint_type, endpoint_config)
-    body = generate_body(endpoint_type, endpoint_config, messages)
-
-    error_msg = ""
-    error_response_code = -1
-
-    global nim_off_ttft
-    global nim_off_tokens_received
-    global nim_off_time_to_next_token
-
-    start_time = time.monotonic()
-    most_recent_received_token_time = time.monotonic()
-
-    try:
-        with requests.post(
-            url + "/score",
-            json=body,
-            stream=True,
-            headers=headers,
-        ) as response:
-            if response.status_code != 200:
-                error_msg = response.text
-                error_response_code = response.status_code
-                response.raise_for_status()
-            for chunk in response.iter_lines(chunk_size=None):   
-                # Parse chunk
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                stem = "data: "
-                chunk = chunk[len(stem) :]
-                if chunk == b"[DONE]":
-                    continue
-                data = json.loads(chunk.decode('UTF-8'))
-                # Check errors
-                if "error" in data:
-                    error_msg = data["error"]["message"]
-                    error_response_code = data["error"]["code"]
-                    raise RuntimeError(data["error"]["message"])
-
-                if data.get("content", None):
-                    nim_off_tokens_received += 1
-                    if not nim_off_ttft:
-                        nim_off_ttft = time.monotonic() - start_time
-                        nim_off_time_to_next_token.append(nim_off_ttft)
-                    else:
-                        nim_off_time_to_next_token.append(
-                            time.monotonic() - most_recent_received_token_time
-                        )
-                    most_recent_received_token_time = time.monotonic()                    
-                    yield data["content"]
-
-    except Exception as e:
-        print(f"Warning Or Error: {error_msg} {error_response_code}")
-
-def get_promptflow_nim_on_stream_response(endpoint_type, endpoint_config, messages):
-    url, key, deployment_name, model = endpoint_config.url, endpoint_config.key, endpoint_config.deployment_name, endpoint_config.model
-    headers = generate_headers(endpoint_type, endpoint_config)
-    body = generate_body(endpoint_type, endpoint_config, messages)
-
-    error_msg = ""
-    error_response_code = -1
-
-    global nim_on_ttft
-    global nim_on_tokens_received
-    global nim_on_time_to_next_token
-
-    start_time = time.monotonic()
-    most_recent_received_token_time = time.monotonic()
-
-    try:
-        with requests.post(
-            url + "/score",
-            json=body,
-            stream=True,
-            headers=headers,
-        ) as response:
-            if response.status_code != 200:
-                error_msg = response.text
-                error_response_code = response.status_code
-                response.raise_for_status()
-            for chunk in response.iter_lines(chunk_size=None):
-                # Parse chunk
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                stem = "data: "
-                chunk = chunk[len(stem) :]
-                if chunk == b"[DONE]":
-                    continue
-                data = json.loads(chunk.decode('UTF-8'))    
-                # Check errors
-                if "error" in data:
-                    error_msg = data["error"]["message"]
-                    error_response_code = data["error"]["code"]
-                    raise RuntimeError(data["error"]["message"])
-                if data.get("content", None):
-                    nim_on_tokens_received += 1
-                    if not nim_on_ttft:
-                        nim_on_ttft = time.monotonic() - start_time
-                        nim_on_time_to_next_token.append(nim_on_ttft)
-                    else:
-                        nim_on_time_to_next_token.append(
-                            time.monotonic() - most_recent_received_token_time
-                        )
-                    most_recent_received_token_time = time.monotonic()
-                    yield data["content"]
-
-    except Exception as e:
-        print(f"Warning Or Error: {error_msg} {error_response_code}")        
+    
+    messages[-1]["content"] = content
 
 def get_os_stream_response(endpoint_type, endpoint_config, messages):
     url, key, deployment_name, model = endpoint_config.url, endpoint_config.key, endpoint_config.deployment_name, endpoint_config.model
@@ -269,7 +181,7 @@ def get_os_stream_response(endpoint_type, endpoint_config, messages):
 
     start_time = time.monotonic()
     most_recent_received_token_time = time.monotonic()
-
+    
     try:
         with requests.post(
             url + "/v1/chat/completions",
@@ -392,7 +304,7 @@ with cols[2]:
     st.session_state.endpoint_choice = EndpointType[endpoint_type]
 cols[3].markdown('<div class="custom-button"></div>', unsafe_allow_html=True)
 with cols[3]:
-    if cols[3].button('Refresh'):
+    if cols[3].button('New session'):
         st.session_state.messages = []
 
 col1, _, col2, _ = st.columns([5,1,5,1])
@@ -413,22 +325,22 @@ nim_on_config = nim_on_endpoints[endpoint_type]
 with col1:
     url = st.text_input("NIM-OFF config", value=nim_off_config.url, key="nim-off-url")
     nim_off_config.url = url
-    key = st.text_input("API key", value=nim_off_config.key, key="nim-off-key", label_visibility="collapsed")
-    nim_off_config.key = key    
+    # key = st.text_input("API key", value=nim_off_config.key, key="nim-off-key", label_visibility="collapsed")
+    # nim_off_config.key = key
     model = st.text_input("Model", value=nim_off_config.model, key="nim-off-model", label_visibility="collapsed")
     nim_off_config.model = model
-    deployment_name = st.text_input("Deployment", value=nim_off_config.deployment_name, key="nim-off-depname", label_visibility="collapsed")
-    nim_off_config.deployment_name = deployment_name
+    # deployment_name = st.text_input("Deployment", value=nim_off_config.deployment_name, key="nim-off-depname", label_visibility="collapsed")
+    # nim_off_config.deployment_name = deployment_name
 
 with col2:
     url = st.text_input("NIM-ON config", value=nim_on_config.url, key="nim-on-url")
     nim_on_config.url = url
-    key = st.text_input("API key", value=nim_on_config.key, key="nim-on-key", label_visibility="collapsed")
-    nim_on_config.key = key    
+    # key = st.text_input("API key", value=nim_on_config.key, key="nim-on-key", label_visibility="collapsed")
+    # nim_on_config.key = key
     model = st.text_input("Model", value=nim_on_config.model, key="nim-on-model", label_visibility="collapsed")
     nim_on_config.model = model
-    deployment_name = st.text_input("Deployment", value=nim_on_config.deployment_name, key="nim-on-depname", label_visibility="collapsed")
-    nim_on_config.deployment_name = deployment_name
+    # deployment_name = st.text_input("Deployment", value=nim_on_config.deployment_name, key="nim-on-depname", label_visibility="collapsed")
+    # nim_on_config.deployment_name = deployment_name
 
 with col1:
     col3, _, col4 = st.columns([1, 5, 1])
@@ -477,7 +389,8 @@ if prompt := st.chat_input("What is up?"):
         with st.chat_message("assistant"):
             messages = [{"role": "assistant" if m["role"] == "NIMOFF" else m["role"], "content": m["content"]} for m in st.session_state.messages if m["role"] in ["user", "NIMOFF"]]
             if endpoint_type == EndpointType.PROMPTFLOW:
-                stream = get_promptflow_nim_off_stream_response(endpoint_type, nim_off_config, messages)
+                get_promptflow_response_and_modify_user_message(endpoint_type, nim_off_config, prompt, messages)
+                stream = get_os_stream_response(EndpointType.AZURE_AI_STUDIO, nim_off_endpoints[EndpointType.AZURE_AI_STUDIO], messages[-3:])
             else:
                 stream = get_os_stream_response(endpoint_type, nim_off_config, messages)
             response = st.write_stream(stream)
@@ -495,7 +408,8 @@ if prompt := st.chat_input("What is up?"):
         with st.chat_message("assistant"):
             messages = [{"role": "assistant" if m["role"] == "NIM" else m["role"], "content": m["content"]}for m in st.session_state.messages if m["role"] in ["user", "NIM"]]            
             if endpoint_type == EndpointType.PROMPTFLOW:
-                stream = get_promptflow_nim_on_stream_response(endpoint_type, nim_on_config, messages)
+                get_promptflow_response_and_modify_user_message(endpoint_type, nim_on_config, prompt, messages)
+                stream = get_nim_stream_response(EndpointType.AZURE_AI_STUDIO, nim_on_endpoints[EndpointType.AZURE_AI_STUDIO], messages[-3:])
             else:
                 stream = get_nim_stream_response(endpoint_type, nim_on_config, messages)
             response = st.write_stream(stream)
