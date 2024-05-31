@@ -92,8 +92,6 @@ nim_on_tokens_received = 0
 
 tokenizer = AutoTokenizer.from_pretrained("mistralai/Mixtral-8x7B-Instruct-v0.1", token="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")
 
-st.session_state.customer_id = "13"
-
 def generate_headers(endpoint_type, endpoint_config):
     headers = {
         'Content-Type': 'application/json',
@@ -138,15 +136,19 @@ def get_promptflow_response_and_modify_user_message(endpoint_type, endpoint_conf
         "question" : prompt
     }
 
+    SESSION_USER_ID = ""
+
     names = [key for key in names_id]
     username_pattern = r'\b(?:' + '|'.join(names) + r')\b'
     matches = re.findall(username_pattern, prompt)
 
     if matches:
         user_name = matches[0]
-        st.session_state.customer_id = names_id[user_name]
+        SESSION_USER_ID = names_id[user_name]
+    else:
+        SESSION_USER_ID = "13"
     
-    body.update({'customerId': st.session_state.customer_id})
+    body.update({'customerId': SESSION_USER_ID})
 
     try:
         with requests.post(
@@ -295,7 +297,7 @@ if "endpoint_choice" not in st.session_state:
     st.session_state.endpoint_choice = EndpointType.PROMPTFLOW
 
 # Set the title of the Streamlit app
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="NIM demo")
 cols = st.columns([2, 3, 2, 1])
 with cols[0]:
     st.header('NIM OFF vs NIM ON')

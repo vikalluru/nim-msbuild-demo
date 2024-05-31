@@ -9,8 +9,7 @@ from enum import Enum, auto
 from transformers import AutoTokenizer
 
 from streamlit_free_text_select import st_free_text_select
-
-# Define the API endpoints and keys
+from services.nemo_retreiver_embedding import save_db, get_context
 
 class EndpointType(Enum):
     AZURE_AI_STUDIO = auto()
@@ -25,28 +24,12 @@ class EndpointConfig:
     deployment_name: str
     health_url_extn: str
 
-
-names_id = {
-    "Adel" : "13",
-    "Christian": "14",
-    "Abhishek": "15",
-    "Vineeth": "16",
-    "Manuel": "17"
-}
-
 nim_off_endpoints = {
     EndpointType.AZURE_AI_STUDIO: EndpointConfig(
         url="https://nim-aml-endpoint-1.westeurope.inference.ml.azure.com",
         key="mVHiH89aX9KtWvartgwXG5V1fmCAjYEy",
         model="/var/azureml-app/azureml-models/mistralai-Mixtral-8x7B-Instruct-v01/5/mlflow_model_folder/data/model",
         deployment_name="os-aml-mixtral-deployment-1",
-        health_url_extn="/health"
-    ),
-    EndpointType.PROMPTFLOW: EndpointConfig(
-        url="https://contoso-flow-prompt-only.swedencentral.inference.ml.azure.com",
-        key="NRl3ay0WFx8060aKfkhqVjFS4GFqQS9U",
-        model="Mixtral 8x7B",
-        deployment_name="contoso-flow-prompt-only-1",
         health_url_extn="/health"
     ),
     EndpointType.API_CATALOG: EndpointConfig(
@@ -65,13 +48,6 @@ nim_on_endpoints = {
         model="mixtral-instruct",
         deployment_name="nim-aml-mixtral-deployment-1",
         health_url_extn="/v1/models"
-    ),
-    EndpointType.PROMPTFLOW: EndpointConfig(
-        url="https://contoso-flow-prompt-only.swedencentral.inference.ml.azure.com",
-        key="NRl3ay0WFx8060aKfkhqVjFS4GFqQS9U",
-        model="Mixtral 8x7B",
-        deployment_name="contoso-flow-prompt-only-1",
-        health_url_extn="/health"
     ),
     EndpointType.API_CATALOG: EndpointConfig(
         url="https://integrate.api.nvidia.com",
@@ -124,50 +100,11 @@ def check_health(endpoint_type, endpoint_config):
     except requests.exceptions.RequestException as e:
         return False
 
-def get_promptflow_response_and_modify_user_message(endpoint_type, endpoint_config, prompt, messages):
-    url, key, deployment_name, model = endpoint_config.url, endpoint_config.key, endpoint_config.deployment_name, endpoint_config.model
-    headers = generate_headers(endpoint_type, endpoint_config)
-
-    content = ""
-    
+def get_prompt_with_context(prompt, nim_on):
     assert messages[-1]["role"] == "user"
-
-    body = {
-        "question" : prompt
-    }
-
-    SESSION_USER_ID = ""
-
-    names = [key for key in names_id]
-    username_pattern = r'\b(?:' + '|'.join(names) + r')\b'
-    matches = re.findall(username_pattern, prompt)
-
-    if matches:
-        user_name = matches[0]
-        SESSION_USER_ID = names_id[user_name]
-    else:
-        SESSION_USER_ID = "13"
-    
-    body.update({'customerId': SESSION_USER_ID})
-
-    try:
-        with requests.post(
-            url + "/score",
-            json=body,
-            headers=headers
-        ) as response:
-            if response.status_code != 200:
-                error_msg = response.text
-                error_response_code = response.status_code
-                response.raise_for_status()
-            data = response.json()
-            if data.get("content", None):
-                content = response.json()["content"]
-    
-    except Exception as e:
-        print(f"Warning or Error: {error_msg}, {error_response_code}")
-    
-    messages[-1]["content"] = content
+    context = get_context(prompt, nim_on)
+    prompt = f"You are an AI assistant in a Financial company. Answer this question: {prompt} based on this: {context}."
+    return prompt
 
 def get_os_stream_response(endpoint_type, endpoint_config, messages):
     url, key, deployment_name, model = endpoint_config.url, endpoint_config.key, endpoint_config.deployment_name, endpoint_config.model
@@ -289,36 +226,65 @@ def get_nim_stream_response(endpoint_type, endpoint_config, messages):
     except Exception as e:
         st.error(f"Warning Or Error: {error_msg} {error_response_code}")
 
+if "nv_stack_off_db_ready" not in st.session_state:
+    st.session_state.nv_stack_off_db_ready = False
+if "nv_stack_on_db_ready" not in st.session_state:
+    st.session_state.nv_stack_on_db_ready = False
+
+st.session_state.uploaded_file = None
+
 # Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "endpoint_choice" not in st.session_state:
-    st.session_state.endpoint_choice = EndpointType.PROMPTFLOW
-
-# Set the title of the Streamlit app
-st.set_page_config(layout="wide")
-cols = st.columns([2, 3, 2, 1])
-with cols[0]:
-    st.header('NIM OFF vs NIM ON')
-with cols[2]:
-    endpoint_type = st.selectbox("Endpoint Type", [endpoint.name for endpoint in EndpointType])
-    st.session_state.endpoint_choice = EndpointType[endpoint_type]
-cols[3].markdown('<div class="custom-button"></div>', unsafe_allow_html=True)
-with cols[3]:
-    if cols[3].button('New session'):
-        st.session_state.messages = []
-
-col1, _, col2, _ = st.columns([5,1,5,1])
-
+# Set the title of the Streamlit app"
+st.set_page_config(layout="wide", page_title="Retriever demo")
 st.markdown("""
     <style>
-    .custom-button {
+    .new-session-button {
         padding-top: 10px;
         padding-bottom: 20px;
     }
     </style>
+    """, unsafe_allow_html=True)    
+
+st.markdown("""
+    <style>
+    .db-button {
+        padding-top: 27px;
+        padding-bottom: 22px;
+    }
+    </style>
     """, unsafe_allow_html=True)
+
+
+cols = st.columns([2, 3, 2, 1])
+with cols[0]:
+    st.header('NV stack OFF vs NV stack ON')
+with cols[2]:
+    endpoint_type = st.selectbox("Endpoint Type", [endpoint.name for endpoint in EndpointType])
+    st.session_state.endpoint_choice = EndpointType[endpoint_type]
+
+cols[3].markdown('<div class="new-session-button"></div>', unsafe_allow_html=True)
+with cols[3]:
+    if cols[3].button('New session'):
+        st.session_state.messages = []
+
+col1, col2, _ = st.columns([5, 2, 5])
+
+with col1:
+    st.session_state.uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+
+
+col2.markdown('<div class="db-button"></div>', unsafe_allow_html=True)
+with col2:
+    if st.button('Create DB'):
+        if st.session_state.uploaded_file is not None:
+            st.toast('Creating database')
+            st.session_state.nv_stack_off_db_ready = save_db(st.session_state.uploaded_file, nim_on=False)
+            st.session_state.nv_stack_on_db_ready = save_db(st.session_state.uploaded_file, nim_on=True)
+
+col1, _, col2, _ = st.columns([5,1,5,1])
 
 endpoint_type = st.session_state.endpoint_choice
 nim_off_config = nim_off_endpoints[endpoint_type]
@@ -327,25 +293,17 @@ nim_on_config = nim_on_endpoints[endpoint_type]
 with col1:
     url = st.text_input("NIM-OFF config", value=nim_off_config.url, key="nim-off-url")
     nim_off_config.url = url
-    # key = st.text_input("API key", value=nim_off_config.key, key="nim-off-key", label_visibility="collapsed")
-    # nim_off_config.key = key
     model = st.text_input("Model", value=nim_off_config.model, key="nim-off-model", label_visibility="collapsed")
     nim_off_config.model = model
-    # deployment_name = st.text_input("Deployment", value=nim_off_config.deployment_name, key="nim-off-depname", label_visibility="collapsed")
-    # nim_off_config.deployment_name = deployment_name
 
 with col2:
     url = st.text_input("NIM-ON config", value=nim_on_config.url, key="nim-on-url")
     nim_on_config.url = url
-    # key = st.text_input("API key", value=nim_on_config.key, key="nim-on-key", label_visibility="collapsed")
-    # nim_on_config.key = key
     model = st.text_input("Model", value=nim_on_config.model, key="nim-on-model", label_visibility="collapsed")
     nim_on_config.model = model
-    # deployment_name = st.text_input("Deployment", value=nim_on_config.deployment_name, key="nim-on-depname", label_visibility="collapsed")
-    # nim_on_config.deployment_name = deployment_name
 
 with col1:
-    col3, _, col4 = st.columns([1, 5, 1])
+    col3, _, col4, col5 = st.columns([1, 4, 1, 2])
     with col3:
         st.text('NIM-OFF')
     with col4:
@@ -353,9 +311,14 @@ with col1:
             st.markdown('<p style="color:green; font-size:16px; text-align:left;">Status: 🟢</p>', unsafe_allow_html=True)
         else:
             st.markdown('<p style="color:red; font-size:16px; text-align:left;">Status: 🔴</p>', unsafe_allow_html=True)
+    with col5:
+        if st.session_state.nv_stack_off_db_ready:
+            st.markdown(f'<p style="color:green; font-size:16px; text-align:left;">DB ready: 🟢 </p>', unsafe_allow_html=True)
+        else:
+            st.markdown('<p style="color:red; font-size:16px; text-align:left;">DB ready: 🔴</p>', unsafe_allow_html=True)
 
 with col2:
-    col3, _, col4 = st.columns([1, 5, 1])
+    col3, _, col4, col5 = st.columns([1, 4, 1, 2])
     with col3:
         st.text('NIM-ON')
     with col4:
@@ -363,6 +326,11 @@ with col2:
             st.markdown('<p style="color:green; font-size:16px; text-align:left;">Status: 🟢</p>', unsafe_allow_html=True)
         else:
             st.markdown('<p style="color:red; font-size:16px; text-align:left;">Status: 🔴</p>', unsafe_allow_html=True)
+    with col5:
+        if st.session_state.nv_stack_on_db_ready:
+            st.markdown(f'<p style="color:green; font-size:16px; text-align:left;">DB ready: 🟢 </p>', unsafe_allow_html=True)
+        else:
+            st.markdown('<p style="color:red; font-size:16px; text-align:left;">DB ready: 🔴</p>', unsafe_allow_html=True)
 
 for message in st.session_state.messages:
     role = message["role"]
@@ -390,11 +358,8 @@ if prompt := st.chat_input("What is up?"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
             messages = [{"role": "assistant" if m["role"] == "NIMOFF" else m["role"], "content": m["content"]} for m in st.session_state.messages if m["role"] in ["user", "NIMOFF"]]
-            if endpoint_type == EndpointType.PROMPTFLOW:
-                get_promptflow_response_and_modify_user_message(endpoint_type, nim_off_config, prompt, messages)
-                stream = get_os_stream_response(EndpointType.AZURE_AI_STUDIO, nim_off_endpoints[EndpointType.AZURE_AI_STUDIO], messages[-3:])
-            else:
-                stream = get_os_stream_response(endpoint_type, nim_off_config, messages)
+            messages[-1]["content"] = get_prompt_with_context(prompt, False)
+            stream = get_os_stream_response(EndpointType.AZURE_AI_STUDIO, nim_off_endpoints[endpoint_type], messages)
             response = st.write_stream(stream)
             if len(response) > 0:
                 itl = sum(nim_off_time_to_next_token)
@@ -408,12 +373,9 @@ if prompt := st.chat_input("What is up?"):
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
-            messages = [{"role": "assistant" if m["role"] == "NIM" else m["role"], "content": m["content"]}for m in st.session_state.messages if m["role"] in ["user", "NIM"]]            
-            if endpoint_type == EndpointType.PROMPTFLOW:
-                get_promptflow_response_and_modify_user_message(endpoint_type, nim_on_config, prompt, messages)
-                stream = get_nim_stream_response(EndpointType.AZURE_AI_STUDIO, nim_on_endpoints[EndpointType.AZURE_AI_STUDIO], messages[-3:])
-            else:
-                stream = get_nim_stream_response(endpoint_type, nim_on_config, messages)
+            messages = [{"role": "assistant" if m["role"] == "NIM" else m["role"], "content": m["content"]}for m in st.session_state.messages if m["role"] in ["user", "NIM"]]
+            messages[-1]["content"] = get_prompt_with_context(prompt, True)
+            stream = get_nim_stream_response(EndpointType.AZURE_AI_STUDIO, nim_on_endpoints[endpoint_type], messages)
             response = st.write_stream(stream)
             if len(response) > 0:
                 itl = sum(nim_on_time_to_next_token)
