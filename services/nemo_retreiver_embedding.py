@@ -9,7 +9,6 @@ from langchain.schema import Document
 from .nv_embedding_client import NVEmbeddings
 
 config = {
-    "openai_key" : "sk-proj-xDGHifSN2zgIcSGWZRVRT3BlbkFJjjgSx275xvsJtYVC4g3d",
     "openai_model": "text-embedding-3-large",
     "nv_model": "NV-Embed-QA-Mistral-7B",
     "maximum_chunk_size": 800,
@@ -17,8 +16,6 @@ config = {
     "nv_embed_url": "http://51.124.97.12:8080/v1/embeddings",
     "chunks_to_retrieve": 1
 }
-
-os.environ['OPENAI_API_KEY'] = config["openai_key"]
 
 def chunk_text(pdf_text) -> List[str]:
     text_splitter = CharacterTextSplitter(
